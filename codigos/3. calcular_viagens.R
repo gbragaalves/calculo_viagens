@@ -1,30 +1,16 @@
-# Inicializacao ----
-
-## Define parametros iniciais ----
-
 ano <- '2023'
-mes <- '03' ### mes dos dados de viagens e demanda
+mes <- '05' ### mes dos dados de viagens e demanda
 ano_gtfs <- '2023'
-mes_gtfs <- '05'
-quinzena_gtfs <- '01'
-tipo_dia <- 'du'  ### mudar para DU
+mes_gtfs <- '06'
+quinzena_gtfs <- '02'
+tipo_dia <- 'du'
 fator_tolerancia <- 1.5
 dia_num <- ifelse(tipo_dia == 'sab',7,1)
 dia_num <- ifelse(tipo_dia == 'du',NA,dia_num)
 
+pacman::p_load(sf,dplyr,Hmisc,data.table,tidyverse,bizdays,gtfstools,lubridate,googlesheets4)
 
-## Carrega bibliotecas e inicializa funcoes ----
-
-library(sf)
-library(dplyr)
-library(Hmisc)
-library(data.table)
-library(tidyverse)
-library(bizdays)
-library(gtfstools)
-library(lubridate)
-
-bizdays::load_calendar("./dados/calendario.json")
+bizdays::load_calendar("../../dados/calendario.json")
 
 `%not_like%` <- purrr::negate(`%like%`)
 
@@ -38,17 +24,31 @@ match_fun_right <- function(v1, v2) {
   ret
 }
 
-## Carrega dados ----
+#gs4_auth(".@gmail.com")
 
-linhas_usar <-
-  fread("./insumos/2023/2023_05_du.csv", encoding = "UTF-8") %>% ### definir local do csv que vem do Google Sheets
+dicionario_lecd <- read_sheet("10qz23KyCkvAZgtu5ITIQqSZVa8tCPoE66DBWPgY5S9U") %>% 
+  rename(nome_fantasia = servico)
+
+linhas_base <- read_sheet("1BUWZ_NQx1BtCvP2gPRCUPfq5lNEHfC1iNZSMSMHOAs0",
+                          "base_dados") %>% 
   mutate(letras = stringr::str_extract(servico, "[A-Z]+" ),
-         numero = stringr::str_extract(servico, "[0-9]+" )) %>% 
+         numero = stringr::str_extract(servico, "[0-9]+" )) %>%
   unite(.,servico,letras,numero, na.rm = T,sep='') %>%
+  mutate(servico = as.character(servico)) %>%
+  select(servico,
+         viagem_inicial,
+         viagem_final,
+         grupo_linha) %>%
+  left_join(dicionario_lecd, by = c('servico' = 'LECD')) %>% 
+  mutate(servico = if_else(!is.na(nome_fantasia),nome_fantasia,servico)) %>% 
+  select(-c(nome_fantasia))
+
+base_calculo <- read_sheet("1d2gOWsdZeuGzDbUdY5OoHNiQN3_WMMk68nVY8ASLqfg",
+                           paste0("base_calculo_",tipo_dia)) %>% 
   rename(
-         horario_inicio = inicio,
-         horario_fim = fim,
-         intervalo = pico
+    horario_inicio = inicio,
+    horario_fim = fim,
+    intervalo = pico
   ) %>%
   mutate(intervalo = gsub(',','.',intervalo),
          intervalo = as.numeric(intervalo),
@@ -62,34 +62,19 @@ linhas_usar <-
          horario_inicio,
          horario_fim,
          grupo_linha,
-         rodar)
+         rodar) %>%
+  left_join(dicionario_lecd, by = c('servico' = 'LECD')) %>% 
+  mutate(servico = if_else(!is.na(nome_fantasia),nome_fantasia,servico)) %>% 
+  select(-c(nome_fantasia)) #%>% 
+  #mutate(horario_inicio = if_else(!is.na(horario_inicio),format(horario_inicio,"%H:%M:%S"),horario_inicio),
+  #        horario_fim = if_else(!is.na(horario_fim),format(horario_fim,"%H:%M:%S"),horario_fim))
 
-linhas_base <-
-  fread("./insumos/2023/linhas_2023.csv", encoding = "UTF-8") %>% ### definir local do csv que vem do Google Sheets
-  mutate(letras = stringr::str_extract(servico, "[A-Z]+" ),
-         numero = stringr::str_extract(servico, "[0-9]+" )) %>%
-  unite(.,servico,letras,numero, na.rm = T,sep='') %>%
-  mutate(servico = as.character(servico)) %>%
-  select(servico,
-         viagem_inicial,
-         viagem_final,
-         grupo_linha) %>% 
-  filter(servico %nin% linhas_usar)
-
-linhas_bruto <- rbindlist(list(linhas_usar,linhas_base),fill = T)
-
-linhas <- linhas_usar %>% 
-  filter(servico %in% c('928')) %>% 
-  #filter(servico == '301') %>% 
-  #filter(rodar) %>% 
-  #filter(!repetir_du) %>% 
-  #filter(servico %in% frescao$servico) %>% 
-  #mutate_all(., list(~na_if(.,""))) %>% 
+linhas <- base_calculo %>% 
+  #filter(servico %in% c('321')) %>% 
+  filter(rodar) %>% 
   mutate(
-    horario_inicio = as.POSIXct(horario_inicio, format = "%H:%M:%S", origin =
-                                  "1970-01-01"),
-    horario_fim = as.POSIXct(horario_fim, format = "%H:%M:%S", origin =
-                               "1970-01-01")
+    horario_inicio = as.POSIXct(hms(horario_inicio), origin = Sys.Date(), tz= 'UTC'),
+    horario_fim = as.POSIXct(hms(horario_fim), origin = Sys.Date(), tz = 'UTC')
   ) %>%
   mutate(horario_inicio = if_else(as.ITime(horario_inicio) < as.ITime("02:00:00"),
                                   horario_inicio + 86400,
@@ -103,40 +88,108 @@ linhas <- linhas_usar %>%
   arrange(servico) %>% 
   mutate(modelo_espelhado = if_else(viagem_inicial %in% c('ambos','circular'),T,F))
 
-end_sumario_detalhado <- paste0("./dados/sumarios/",ano,"/sumario_sent_hora_",mes,"_",tipo_dia,".csv")
+end_sumario_detalhado <- paste0("../../dados/sumarios/",ano,"/sumario_sent_hora_",mes,"_",tipo_dia,".csv")
 
 sumario_trips <- fread(end_sumario_detalhado) %>% 
   rename(servico = servico_realizado) %>% 
-  filter(servico %in% linhas_bruto$servico) %>% 
-  left_join(select(linhas_bruto,servico,grupo_linha))
+  filter(servico %in% linhas_base$servico) %>% 
+  left_join(select(linhas_base,servico,grupo_linha), relationship = "many-to-many")
 
 velocidade_grupos <- sumario_trips %>%
   group_by(grupo_linha,hora_partida) %>%
   summarise(velocidade_media = round(mean(velocidade_media),2))
 
-gtfs <- read_gtfs(paste0("./dados/gtfs/",ano_gtfs,"/gtfs_",ano_gtfs,'-',mes_gtfs,'-',quinzena_gtfs,'Q.zip'))
-gtfs <- filter_by_service_id(gtfs,'U')
+gtfs <- read_gtfs(paste0("../../dados/gtfs/",ano_gtfs,"/gtfs_combi_",ano_gtfs,'-',mes_gtfs,'-',quinzena_gtfs,'Q.zip'))
+
+tipo_dia_sym <- case_when(tipo_dia == 'du' ~ 'U_',
+                          tipo_dia == 'sab' ~ 'S_',
+                          tipo_dia == 'dom' ~ 'D_')
+                          
+service_id_usar <- gtfs$calendar %>% 
+  select(service_id) %>% 
+  filter(service_id %like% tipo_dia_sym) %>% 
+  filter(service_id %not_like% 'DESAT') %>% 
+  pull(service_id)
+  
+gtfs <- filter_by_service_id(gtfs,service_id_usar)
 
 routes <- gtfs$routes %>%
   mutate(letras = stringr::str_extract(route_short_name, "[A-Z]+" ),
          numero = stringr::str_extract(route_short_name, "[0-9]+" )) %>% 
-  unite(.,route_short_name,letras,numero, na.rm = T,sep='') %>% 
-  filter(route_short_name %in% linhas_bruto$servico) %>% 
-  select(route_id) %>% 
-  unlist()
+  unite(.,route_short_name,letras,numero, na.rm = T,sep='') %>%
+  left_join(dicionario_lecd, by = c('route_short_name' = 'LECD')) %>% 
+  mutate(route_short_name = if_else(!is.na(nome_fantasia),nome_fantasia,route_short_name)) %>% 
+  select(-c(nome_fantasia)) %>% 
+  filter(route_short_name %in% linhas_base$servico) %>% 
+  pull(route_id)
 
 gtfs <- filter_by_route_id(gtfs,routes)
 
-trips <- gtfs$trips %>%
-  mutate(letras = stringr::str_extract(trip_short_name, "[A-Z]+" ),
-         numero = stringr::str_extract(trip_short_name, "[0-9]+" )) %>% 
-  unite(.,trip_short_name,letras,numero, na.rm = T,sep='') %>% 
-  group_by(route_id) %>%
-  ungroup() %>% 
-  distinct(shape_id,trip_short_name,.keep_all = T) %>% 
-  select(trip_id,trip_short_name,shape_id,direction_id)
+viagens_freq <- gtfs$frequencies %>%
+  mutate(start_time = if_else(lubridate::hour(hms(start_time)) >= 24,
+                              hms(start_time) - lubridate::hours(24),
+                              hms(start_time)
+  )) %>%
+  mutate(end_time = if_else(lubridate::hour(hms(end_time)) >= 24,
+                            hms(end_time) - lubridate::hours(24),
+                            hms(end_time)
+  )) %>%
+  mutate(
+    start_time = paste(sprintf("%02d", lubridate::hour(start_time)),
+                       sprintf("%02d", lubridate::minute(start_time)),
+                       sprintf("%02d", lubridate::second(start_time)),
+                       sep = ":"
+    ),
+    end_time = paste(sprintf("%02d", lubridate::hour(end_time)),
+                     sprintf("%02d", lubridate::minute(end_time)),
+                     sprintf("%02d", lubridate::second(end_time)),
+                     sep = ":"
+    )
+  ) %>%
+  mutate(
+    start_time = as.POSIXct(start_time,
+                            format = "%H:%M:%S", origin =
+                              "1970-01-01"
+    ),
+    end_time = as.POSIXct(end_time,
+                          format = "%H:%M:%S", origin =
+                            "1970-01-01"
+    )
+  ) %>%
+  mutate(start_time = if_else(as.ITime(start_time) < as.ITime("02:00:00"),
+                              start_time + 86400,
+                              start_time
+  )) %>%
+  mutate(end_time = if_else(end_time < start_time,
+                            end_time + 86400,
+                            end_time
+  )) %>%
+  mutate(
+    duracao = as.integer(difftime(end_time, start_time, units = "secs")),
+    partidas = as.integer(duracao / headway_secs)
+  )
 
-gtfs <- filter_by_trip_id(gtfs,trips$trip_id)
+trips <- gtfs$trips %>%
+  mutate(
+    letras = stringr::str_extract(trip_short_name, "[A-Z]+"),
+    numero = stringr::str_extract(trip_short_name, "[0-9]+")
+  ) %>%
+  tidyr::unite(., trip_short_name, letras, numero, na.rm = T, sep = "") %>%
+  left_join(dicionario_lecd, by = c('trip_short_name' = 'LECD')) %>% 
+  mutate(trip_short_name = if_else(!is.na(nome_fantasia),nome_fantasia,trip_short_name)) %>% 
+  select(-c(nome_fantasia)) %>% 
+  left_join(select(viagens_freq, trip_id, partidas)) %>%
+  mutate(partidas = if_else(is.na(partidas), 1, partidas)) %>%
+  group_by(shape_id) %>%
+  mutate(ocorrencias = sum(partidas)) %>%
+  ungroup() %>%
+  group_by(route_id, direction_id) %>%
+  slice_max(ocorrencias, n = 1) %>%
+  ungroup() %>%
+  distinct(shape_id, trip_short_name, .keep_all = T) %>%
+  select(trip_id, trip_short_name, shape_id, direction_id)
+
+gtfs <- filter_by_trip_id(gtfs, trips$trip_id)
 
 gtfs$shapes <- as.data.table(gtfs$shapes) %>% 
   arrange(shape_id,shape_pt_sequence)
@@ -156,16 +209,14 @@ trips_resultado <- trips %>%
          extensao = round(extensao,0)) %>% 
   select(-c(shape_id))
 
-pasta_ano <- paste0("./resultados/trips/",ano_gtfs)
-ifelse(!dir.exists(file.path(getwd(),pasta_ano)), dir.create(file.path(getwd(),pasta_ano)), FALSE)
-pasta_mes <- paste0("./resultados/trips/",ano_gtfs,"/",mes_gtfs)
-ifelse(!dir.exists(file.path(getwd(),pasta_mes)), dir.create(file.path(getwd(),pasta_mes)), FALSE)
+pasta_ano <- paste0("../../resultados/trips/",ano_gtfs)
+ifelse(!dir.exists(file.path(getwd(),pasta_ano)), dir.create(file.path(getwd(),pasta_ano), recursive = TRUE), FALSE)
+pasta_mes <- paste0("../../resultados/trips/",ano_gtfs,"/",mes_gtfs)
+ifelse(!dir.exists(file.path(getwd(),pasta_mes)), dir.create(file.path(getwd(),pasta_mes), recursive = TRUE), FALSE)
 
 fwrite(trips_resultado,paste0(pasta_mes,"/trips_",ano,"-",mes_gtfs,"-",quinzena_gtfs,"Q_",tipo_dia,".csv"), sep=";",dec=",")
 
 rm(gtfs,routes,shapes,trips_resultado)
-
-# Processamento ----
 
 trips <- trips %>%
   rename(servico = trip_short_name) %>%
@@ -186,7 +237,7 @@ linhas_trips <- trips %>%
   drop_na() %>% 
   mutate(grupo_linha = if_else(grupo_linha == 'Auxiliar AP 51' & 'Auxiliar AP 51' %nin% sumario_trips$grupo_linha,'Auxiliar AP 52',grupo_linha))
 
-rho <- readRDS(paste0("./dados/demanda/",ano,"/rho_",ano,"_",mes,".rds")) %>%
+rho <- readRDS(paste0("../../dados/demanda/",ano,"/rho_",ano,"_",mes,".rds")) %>%
   ungroup()
 
 demanda_linha <- rho %>%
@@ -196,10 +247,11 @@ demanda_linha <- rho %>%
   summarise(pax = round(mean(demanda))) %>%
   ungroup() %>%
   group_by(servico) %>%
-  mutate(perc_pax = round((pax/max(pax))*100,2))
+  mutate(perc_pax = round((pax/max(pax))*100,2),
+         hora = hour(hora))
 
 demanda_grupo <- demanda_linha %>%
-  left_join(select(linhas_bruto,servico,grupo_linha)) %>%
+  left_join(select(linhas_base,servico,grupo_linha)) %>%
   group_by(grupo_linha,hora) %>%
   summarise(pax_grupo = sum(pax)) %>%
   ungroup() %>%
@@ -208,12 +260,24 @@ demanda_grupo <- demanda_linha %>%
 
 rm(rho)
 
+criar_sequencia_horas <- function(start, end) {
+  seq.POSIXt(from = ceiling_date(start, "hour")-3600, 
+             to = floor_date(end, "hour")+3600, 
+             by = "hour")
+}
+
 freq_bruta <- linhas_trips %>%
+  group_by(servico, sentido) %>% 
+  mutate(start_time = map2(horario_inicio, horario_fim, criar_sequencia_horas)) %>% 
+  unnest(start_time) %>% 
+  mutate(end_time = start_time+3600) %>% 
+  filter(start_time != end_time) %>% 
+  mutate(hora = hour(start_time)) %>% 
   left_join(demanda_grupo) %>%
-  left_join(demanda_linha) %>%
+  left_join(demanda_linha) %>% 
   mutate(perc_hora_final = if_else(is.na(perc_pax),perc_pax_grupo,perc_pax),
-         hora = as.integer(hora)) %>%
-  select(-c(perc_pax,pax_grupo,perc_pax_grupo)) %>%
+         perc_hora_final = if_else(is.na(perc_hora_final),min(perc_hora_final, na.rm = T),perc_hora_final)) %>%
+  select(-c(perc_pax,pax_grupo,perc_pax_grupo)) %>% 
   ungroup() %>%
   left_join(select(sumario_trips,servico,sentido,hora_partida,velocidade_media),
             by=c("servico"="servico","sentido"="sentido","hora"="hora_partida")) %>%
@@ -226,18 +290,8 @@ freq_bruta <- linhas_trips %>%
   mutate(velocidade_media = if_else(is.na(veloc_media_linha),veloc_media_grupo,veloc_media_linha),
          velocidade_media = ifelse(is.na(velocidade_media),max(velocidade_media, na.rm = T),velocidade_media)) %>%
   ungroup() %>%
-  select(-c(grupo_linha,veloc_media_linha,veloc_media_grupo)) %>%
-  mutate(hora = as.POSIXct(paste0(hora,":00:00"), format="%H:%M:%S")) %>%
-  group_by(servico,sentido) %>%
-  mutate(start_time = case_when(row_number() == 1 & hora>horario_inicio ~ horario_inicio,
-                                hora>horario_fim ~ horario_fim,
-                                TRUE ~ hora)) %>%
-  mutate(end_time = hora+3600) %>%
-  mutate(end_time = case_when(row_number() == n() & end_time<horario_fim ~ horario_fim,
-                              hora>horario_fim ~ horario_fim,
-                              TRUE ~ end_time)) %>%
-  arrange(servico,sentido) %>%
-  ungroup()
+  select(-c(grupo_linha,veloc_media_linha,veloc_media_grupo)) %>% 
+  arrange(servico,sentido,start_time)
 
 freq_bruta_inicio <- freq_bruta %>%
   group_by(servico,sentido) %>%
@@ -258,7 +312,18 @@ freq_bruta_meio <- freq_bruta %>%
   mutate(start_time = start_time + 1200,
          end_time = end_time - 1200)
 
-freq_bruta_proc <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_fim)) %>%
+freq_bruta_proc_1 <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_fim)) %>%
+  group_by(servico,sentido) %>% 
+  mutate(start_time = case_when(row_number() == 1 ~ horario_inicio,
+                                start_time>horario_fim ~ horario_fim,
+                                TRUE ~ start_time)) %>%
+  mutate(end_time = case_when(row_number() == n() ~ horario_fim,
+                              end_time>horario_fim ~ horario_fim,
+                              TRUE ~ end_time)) %>% 
+  filter(start_time != end_time) %>% 
+  filter(start_time < end_time) %>% 
+  ungroup() %>% 
+  select(-c(rodar,pax)) %>% 
   group_by(servico) %>% 
   mutate(hora_corte = horario_inicio + difftime(horario_fim,horario_inicio,units = "mins")/2) %>% 
   group_by(servico,sentido) %>%
@@ -267,12 +332,14 @@ freq_bruta_proc <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_f
          end_time = if_else(end_time > horario_fim,horario_fim,end_time))  %>%
   filter(start_time != end_time,
          end_time > start_time,
-         start_time < end_time) %>%
+         start_time < end_time)
+
+freq_bruta_proc_2 <- freq_bruta_proc_1 %>%
   mutate(perc_hora_final = case_when(row_number() == n() ~ perc_hora_final,
                                      TRUE ~ (perc_hora_final+lead(perc_hora_final))/2),
          velocidade_media = case_when(row_number() == 1 ~ (velocidade_media+lead(velocidade_media))/2,
                                       row_number() == n() ~ (velocidade_media+lag(velocidade_media))/2,
-                                      TRUE ~ (velocidade_media+lag(velocidade_media)+lead(velocidade_media))/3))%>%
+                                      TRUE ~ (velocidade_media+lag(velocidade_media)+lead(velocidade_media))/3)) %>%
   mutate(tempo_viagem = extensao/(velocidade_media/3.6)) %>%
   ungroup() %>%
   group_by(servico) %>%
@@ -285,11 +352,10 @@ freq_bruta_proc <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_f
   rename(intervalo_teorico = intervalo) %>%
   mutate(intervalo_pratico = round((sum(tempo_viagem[start_time==hora_usar])+
                                       (28 * (1.25-(max(perc_hora_final[start_time==hora_usar])/100))*60))/frota_referencia)) %>%
-  mutate(intervalo_pratico = if_else((intervalo_pratico/60)*fator_tolerancia > intervalo_teorico,intervalo_teorico*60,intervalo_pratico)) %>%  ### impedir intervalo menor que referência
-  mutate(intervalo_pratico = case_when(as.numeric(intervalo_pratico) <= 900 ~ plyr::round_any(as.numeric(intervalo_pratico), 30),
-                                       as.numeric(intervalo_pratico) > 900 ~ plyr::round_any(as.numeric(intervalo_pratico), 60),
+  mutate(intervalo_pratico = if_else(intervalo_pratico/60 < intervalo_teorico,intervalo_teorico*60,intervalo_pratico)) %>%  ### impedir intervalo menor que referência
+  mutate(intervalo_pratico = case_when(as.numeric(intervalo_pratico) <= 300 ~ plyr::round_any(as.numeric(intervalo_pratico), 30),
+                                       as.numeric(intervalo_pratico) > 300 ~ plyr::round_any(as.numeric(intervalo_pratico), 60),
                                        is.na(intervalo_pratico) ~ as.numeric(intervalo_pratico))) %>%
-  mutate(intervalo_pratico_mins = intervalo_pratico/60) %>%
   arrange(servico,sentido,start_time) %>%
   mutate(viagem_inicial = case_when(viagem_inicial == 'ida' ~ 'I',
                                     viagem_inicial == 'volta' ~ 'V',
@@ -305,7 +371,7 @@ freq_bruta_proc <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_f
   mutate(horario_inicio = if (unique(modelo_espelhado)==T) horario_inicio else
     if_else((sentido == 'I' & viagem_inicial == 'V') | (sentido == 'V' & viagem_inicial == 'I'),
             lubridate::ceiling_date(horario_inicio
-                                  +420+head(tempo_viagem[sentido==viagem_inicial&end_time>horario_inicio],1),unit = "5 minutes"),
+                                    +420+head(tempo_viagem[sentido==viagem_inicial&end_time>horario_inicio],1),unit = "5 minutes"),
             horario_inicio),
     horario_fim = if (unique(modelo_espelhado)==T) horario_fim else
       if_else((sentido == 'I' & viagem_final == 'V') | (sentido == 'V' & viagem_final == 'I'),
@@ -321,47 +387,56 @@ freq_bruta_proc <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_f
   arrange(servico,sentido,start_time) %>%
   rename(intervalo_pico = intervalo_pratico,
          perc_pax = perc_hora_final) %>%
-  ungroup() %>%
+  ungroup()
+
+freq_bruta_proc_3 <- freq_bruta_proc_2  %>%
+  group_by(servico,sentido,start_time) %>%
+  slice_max(perc_pax, n = 1) %>% 
   group_by(servico,start_time) %>%
-  mutate(tempo_ciclo = sum(tempo_viagem)+(28 * (1.25-(perc_pax/100))*60),
-         tempo_placa = 28 * (1.25-(perc_pax/100))) %>%
+  mutate(tempo_placa = 28 * 60 * (1.25-(perc_pax/100)),
+         tempo_placa = if_else(start_time < (horario_inicio+10800), 420, tempo_placa),
+         tempo_ciclo = sum(tempo_viagem)+ tempo_placa,
+         tempo_ciclo = if_else(tempo_ciclo == tempo_viagem+tempo_placa,tempo_viagem*2,tempo_ciclo)) %>%
   mutate(intervalo_hora_teorico = intervalo_pico/(perc_pax/100),
-         intervalo_hora_teorico = case_when(as.numeric(intervalo_hora_teorico) <= 300 ~ plyr::round_any(as.numeric(intervalo_hora_teorico), 30),
-                                            as.numeric(intervalo_hora_teorico) > 300 ~ plyr::round_any(as.numeric(intervalo_hora_teorico), 60),
+         intervalo_hora_teorico = case_when(as.numeric(intervalo_hora_teorico) <= 300 ~ plyr::round_any(as.numeric(intervalo_hora_teorico), 30, ceiling),
+                                            as.numeric(intervalo_hora_teorico) > 300 ~ plyr::round_any(as.numeric(intervalo_hora_teorico), 60, ceiling),
                                             is.na(intervalo_hora_teorico) ~ as.numeric(intervalo_hora_teorico)),
          intervalo_hora_teorico = if_else(intervalo_hora_teorico < intervalo_pico,intervalo_pico,intervalo_hora_teorico),
-         intervalo_hora_teorico = case_when(intervalo_pico<=300 & intervalo_hora_teorico > 600 & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) ~ 600,
-                                            intervalo_pico<=300 & intervalo_hora_teorico > 900 & (start_time < (horario_inicio+3600) | start_time > (horario_fim-3600)) ~ 900,
-                                            intervalo_pico>300 & intervalo_pico<=600 & intervalo_hora_teorico > 1200 & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) ~ 1200,
-                                            intervalo_pico>300 & intervalo_pico<=600 & intervalo_hora_teorico > 1800 & (start_time < (horario_inicio+3600) | start_time > (horario_fim-3600)) ~ 1800,
-                                            intervalo_pico>600 & intervalo_pico<=900&intervalo_hora_teorico > 1800 & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600)  ~ 1800,
-                                            intervalo_pico>600 & intervalo_pico<=900&intervalo_hora_teorico > 2700 & (start_time < (horario_inicio+3600) | start_time > (horario_fim-3600)) ~ 2700,
-                                            intervalo_pico>900 & intervalo_pico<=1800&intervalo_hora_teorico > 2700 & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600)  ~ 2700,
-                                            intervalo_pico<=3600&intervalo_hora_teorico > 3600 ~ 3600,
+         intervalo_hora_teorico = case_when(intervalo_pico<=300 & intervalo_hora_teorico > 600 & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') ~ 600,
+                                            intervalo_pico<=300 & intervalo_hora_teorico > 900 & (as.ITime(start_time) < as.ITime('05:00:00') | as.ITime(start_time) > as.ITime('22:00:00')) ~ 900,
+                                            intervalo_pico>300 & intervalo_pico<=600 & intervalo_hora_teorico > 1200 & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') ~ 1200,
+                                            intervalo_pico>300 & intervalo_pico<=600 & intervalo_hora_teorico > 1800 & (as.ITime(start_time) < as.ITime('05:00:00') | as.ITime(start_time) > as.ITime('22:00:00')) ~ 1800,
+                                            intervalo_pico>600 & intervalo_pico<=900&intervalo_hora_teorico > 1800 & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00')  ~ 1800,
+                                            intervalo_pico>600 & intervalo_pico<=900&intervalo_hora_teorico > 2700 & (as.ITime(start_time) < as.ITime('05:00:00') | as.ITime(start_time) > as.ITime('22:00:00')) ~ 2700,
+                                            intervalo_pico>900 & intervalo_pico<=1800&intervalo_hora_teorico > 2700 & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00')  ~ 2700,
+                                            intervalo_pico<=3600 & intervalo_hora_teorico > 3600 ~ 3600,
                                             intervalo_hora_teorico > 4500 ~ 4500,
-                                            TRUE ~ intervalo_hora_teorico),
-         frota_hora_dec = tempo_ciclo/intervalo_hora_teorico,
-         frota_hora = round(frota_hora_dec),
+                                            TRUE ~ intervalo_hora_teorico)) %>% 
+  mutate(frota_hora_dec = tempo_ciclo/intervalo_hora_teorico,
+         frota_hora = ceiling(frota_hora_dec),
          frota_hora = if_else(frota_hora<1,1,frota_hora),
-         frota_hora = if_else(frota_hora>frota_referencia,frota_referencia,frota_hora),
-         intervalo_pratico = round((sum(tempo_viagem)+
-                                      (28 * (1.25-(perc_pax/100))*60))/frota_hora),
+         frota_hora = if_else(frota_hora>frota_referencia,frota_referencia,frota_hora)) %>% 
+  mutate(intervalo_pratico = round(tempo_ciclo/frota_hora),
          intervalo_pratico = if_else(intervalo_pratico < intervalo_pico,intervalo_pico,intervalo_pratico),
-         frota_hora = case_when(intervalo_pico<=300 & intervalo_pratico > (600*fator_tolerancia) & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) & frota_hora < frota_referencia ~ frota_hora+1,
-                                intervalo_pico>300 & intervalo_pico<=600 & intervalo_pratico > (1200*fator_tolerancia) & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) & frota_hora < frota_referencia ~ frota_hora+1,
-                                intervalo_pico>600 & intervalo_pico<=900&intervalo_pratico > (1800*fator_tolerancia) & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) & frota_hora < frota_referencia ~ frota_hora+1,
-                                intervalo_pico>900 & intervalo_pico<=1800&intervalo_pratico > (2700*fator_tolerancia) & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) & frota_hora < frota_referencia ~ frota_hora+1,
-                                intervalo_pico>1800 & intervalo_pico<=2700&intervalo_pratico >  (3600*fator_tolerancia) & start_time > (horario_inicio+3600) & start_time < (horario_fim-3600) & frota_hora < frota_referencia ~ frota_hora+1,
+         frota_hora = case_when(intervalo_pico<=300 & intervalo_pratico > (600*fator_tolerancia) & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') & frota_hora < frota_referencia ~ frota_hora+1,
+                                intervalo_pico>300 & intervalo_pico<=600 & intervalo_pratico > (1200*fator_tolerancia) & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') & frota_hora < frota_referencia ~ frota_hora+1,
+                                intervalo_pico>600 & intervalo_pico<=900&intervalo_pratico > (1800*fator_tolerancia) & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') & frota_hora < frota_referencia ~ frota_hora+1,
+                                intervalo_pico>900 & intervalo_pico<=1800&intervalo_pratico > (2700*fator_tolerancia) & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') & frota_hora < frota_referencia ~ frota_hora+1,
+                                intervalo_pico>1800 & intervalo_pico<=2700&intervalo_pratico >  (3600*fator_tolerancia) & as.ITime(start_time) >= as.ITime('05:00:00') & as.ITime(start_time) <= as.ITime('22:00:00') & frota_hora < frota_referencia ~ frota_hora+1,
                                 intervalo_pratico > (3600*fator_tolerancia) & frota_hora < frota_referencia ~ frota_hora+1,
                                 TRUE ~ frota_hora),
-         intervalo_pratico = round((sum(tempo_viagem)+
-                                      (28 * (1.25-(perc_pax/100))*60))/frota_hora),
+         intervalo_pratico = round(tempo_ciclo/frota_hora),
          intervalo_pratico = if_else(intervalo_pratico < intervalo_pico,intervalo_pico,intervalo_pratico),
-         intervalo_pratico = case_when(as.numeric(intervalo_pratico) <= 300 ~ plyr::round_any(as.numeric(intervalo_pratico), 30),
-                                       as.numeric(intervalo_pratico) > 300 ~ plyr::round_any(as.numeric(intervalo_pratico), 60),
+         intervalo_pratico = case_when(as.numeric(intervalo_pratico) <= 300 ~ plyr::round_any(as.numeric(intervalo_pratico), 30, ceiling),
+                                       as.numeric(intervalo_pratico) > 300 & as.numeric(intervalo_pratico) <= 900 ~ plyr::round_any(as.numeric(intervalo_pratico), 60, ceiling),
+                                       as.numeric(intervalo_pratico) > 900 & as.numeric(intervalo_pratico) <= 3000 ~ plyr::round_any(as.numeric(intervalo_pratico), 300, ceiling),
+                                       as.numeric(intervalo_pratico) > 3000 ~ plyr::round_any(as.numeric(intervalo_pratico), 600, ceiling),
                                        is.na(intervalo_pratico) ~ as.numeric(intervalo_pratico))
   ) %>%
   ungroup() %>%
+  mutate(intervalo_minutos = intervalo_pratico/60)
+
+freq_bruta_proc <- freq_bruta_proc_3 %>% 
   group_by(servico) %>%
   mutate(frota_pico_manha = max(frota_hora[start_time<hora_corte]),
          frota_pico_tarde = max(frota_hora[start_time>hora_corte]),
@@ -397,7 +472,7 @@ freq_bruta_proc <- rbindlist(list(freq_bruta_inicio,freq_bruta_meio,freq_bruta_f
          intervalo_pratico_min = intervalo_pratico/60,
   ) %>%
   ungroup() %>%
-  select(-c(frota_pico_manha,frota_pico_tarde,hora,pax,hora_usar,intervalo_pratico_mins)) %>%
+  select(-c(frota_pico_manha,frota_pico_tarde,hora,hora_usar,intervalo_minutos)) %>%
   select(servico,sentido,start_time,end_time,frota_hora,intervalo_pratico_min,perc_pax,everything())
 
 ## Manha ----
@@ -415,13 +490,12 @@ for (z in 1:5){
     mutate(end_time = if_else(intervalo_pratico > difftime(end_time,start_time, units = "secs") &
                                 start_time < horario_inicio+3600,start_time+intervalo_pratico,end_time)) %>%
     mutate(start_time = if_else(row_number() != 1,lag(end_time),start_time)) %>%
-    #mutate(teste = intervalo_pratico <= difftime(end_time,start_time, units = "secs")) %>%
     ungroup()
 }
 
 while (length(unique(freq_ida_manha$teste))!=1){
   freq_ida_manha <- freq_ida_manha %>%
-    group_by(servico,sentido) %>%
+    group_by(servico) %>%
     mutate(end_time = if_else(lead(intervalo_pratico)==intervalo_pratico & !is.na(lead(intervalo_pratico)),lead(end_time),end_time)) %>%
     filter(end_time != lag(end_time) | is.na(lag(end_time))) %>%
     mutate(teste = intervalo_pratico==lead(intervalo_pratico)) %>%
@@ -441,7 +515,7 @@ freq_ida_manha <- freq_ida_manha %>%
 
 while (all(freq_ida_manha$inteiro)!=TRUE){
   freq_ida_manha <- freq_ida_manha %>%
-    group_by(servico,sentido) %>%
+    group_by(servico) %>%
     mutate(end_time = if_else(
       inteiro,end_time,
       if_else((lead(intervalo_pratico)<intervalo_pratico | is.na(lead(intervalo_pratico)))&end_time<fim_pico_manha,
@@ -449,16 +523,16 @@ while (all(freq_ida_manha$inteiro)!=TRUE){
               start_time+as.integer(minutos/(intervalo_pratico/60)+1)*intervalo_pratico))) %>%
     mutate(end_time = as.POSIXct(end_time, origin='1970-01-01')) %>%
     ungroup() %>%
-    arrange(servico,sentido,start_time)
+    arrange(servico,start_time)
   
   freq_ida_manha <- freq_ida_manha %>%
-    group_by(servico,sentido) %>%
+    group_by(servico) %>%
     filter(row_number() == 1 | row_number() == n() | difftime(end_time,start_time,units = "secs")>intervalo_pratico) %>%
     mutate(start_time=if_else(!is.na(lag(end_time)),lag(end_time),start_time)) %>%
     mutate(start_time = as.POSIXct(start_time, origin='1970-01-01')) %>%
     ungroup() %>%
     filter(start_time < horario_fim) %>%
-    arrange(servico,sentido,start_time)
+    arrange(servico,start_time)
   
   freq_ida_manha <- freq_ida_manha %>%
     group_by(servico,sentido) %>%
@@ -469,7 +543,7 @@ while (all(freq_ida_manha$inteiro)!=TRUE){
     ungroup() %>%
     filter(start_time != end_time) %>%
     filter(viagens > 0) %>% 
-    arrange(servico,sentido,start_time)
+    arrange(servico,start_time)
 }
 
 freq_ida_manha <- freq_ida_manha %>%
@@ -487,7 +561,7 @@ linhas_volta_manha <- unique(freq_volta_manha$servico)
 dados_ida <- freq_ida_manha %>%
   ungroup() %>%
   select(servico,start_time,end_time,viagens,tempo_viagem) %>%
-  mutate(start_time = start_time+tempo_viagem) %>%
+  mutate(start_time = lubridate::ceiling_date(start_time+tempo_viagem, unit = "5 minutes")) %>%
   group_by(servico) %>% 
   mutate(end_time = if_else(!is.na(lead(start_time)),lead(start_time),end_time)) %>%
   mutate(viagens_acum = cumsum(viagens)) %>% 
@@ -504,16 +578,16 @@ freq_volta_manha <- freq_volta_manha %>%
                              match_fun = list(`==`, match_fun_left, match_fun_right))
 
 freq_volta_manha <- freq_volta_manha %>%
-  mutate(frota_hora = if_else((start_time < entrega_pico_manha & !is.na(viagens_ida)), viagens_ida,frota_hora)) %>% 
+  mutate(frota_hora = if_else((start_time < entrega_pico_manha & !is.na(viagens_ida) & viagens_ida <= frota_referencia), viagens_ida,frota_hora)) %>% 
   group_by(servico) %>% 
-  mutate(frota_hora = if_else((row_number() == 1 & !is.na(viagens_acum)), viagens_acum,frota_hora))
+  mutate(frota_hora = if_else((row_number() == 1 & !is.na(viagens_acum) & viagens_acum <= frota_referencia), viagens_acum,frota_hora))
 
 for (z in 1:20){
   freq_volta_manha <- freq_volta_manha %>%
     group_by(servico) %>%
-    mutate(end_time = if_else(lead(frota_hora)==frota_hora & !is.na(lead(frota_hora)) & start_time < entrega_pico_manha,lead(end_time),end_time)) %>%
+    mutate(end_time = if_else(lead(frota_hora)==frota_hora & lead(viagens_acum)==viagens_acum & !is.na(lead(frota_hora)) & start_time < entrega_pico_manha,lead(end_time),end_time)) %>%
     filter(end_time != lag(end_time) | is.na(lag(end_time))) %>%
-    mutate(teste = frota_hora==lead(frota_hora)) %>%
+    mutate(teste = frota_hora==lead(frota_hora) & lead(viagens_acum)==viagens_acum) %>%
     mutate(teste = if_else(is.na(teste),FALSE,teste))
 }
 
@@ -530,13 +604,33 @@ while (length(unique(freq_volta_manha$teste))!=1){
 }
 
 freq_volta_manha <- freq_volta_manha %>%
+  select(-c(teste))
+
+while (length(unique(freq_volta_manha$teste))!=1){
+  freq_volta_manha <- freq_volta_manha %>%
+    group_by(servico) %>%
+    mutate(trocar_frota = if_else(lag(frota_hora) > frota_hora & lead(frota_hora) > frota_hora & row_number() != 1 & row_number() != n(),T,F)) %>% 
+    mutate(frota_hora = if_else(trocar_frota,frota_hora + lag(frota_hora),frota_hora),
+           start_time = if_else(trocar_frota,lag(start_time),start_time)) %>% 
+    mutate(remover = if_else(lead(trocar_frota) & row_number() != n(),T,F)) %>% 
+    filter(!remover) %>% 
+    mutate(end_time = if_else(lead(intervalo_pratico)==intervalo_pratico & !is.na(lead(intervalo_pratico))& start_time >= entrega_pico_manha,lead(end_time),end_time)) %>%
+    filter(end_time != lag(end_time) | is.na(lag(end_time))) %>%
+    mutate(teste = lag(frota_hora) > frota_hora & lead(frota_hora) > frota_hora) %>%
+    mutate(teste = if_else(is.na(teste),FALSE,teste)) %>% 
+      select(-c(remover,trocar_frota))
+}
+
+freq_volta_manha <- freq_volta_manha %>%
   group_by(servico) %>%
   mutate(intervalo_frota = if_else(start_time < entrega_pico_manha,
                                    tempo_viagem/frota_hora,
                                    intervalo_pratico),
          intervalo_pratico = if_else(intervalo_frota > intervalo_pratico, intervalo_frota, intervalo_pratico),
-         intervalo_pratico = case_when(as.numeric(intervalo_pratico) <= 900 ~ plyr::round_any(as.numeric(intervalo_pratico), 15),
-                                       as.numeric(intervalo_pratico) > 900 ~ plyr::round_any(as.numeric(intervalo_pratico), 60),
+         intervalo_pratico = case_when(as.numeric(intervalo_pratico) <= 300 ~ plyr::round_any(as.numeric(intervalo_pratico), 30, ceiling),
+                                       as.numeric(intervalo_pratico) > 300 & as.numeric(intervalo_pratico) <= 900 ~ plyr::round_any(as.numeric(intervalo_pratico), 60, ceiling),
+                                       as.numeric(intervalo_pratico) > 900 & as.numeric(intervalo_pratico) <= 3000 ~ plyr::round_any(as.numeric(intervalo_pratico), 300, ceiling),
+                                       as.numeric(intervalo_pratico) > 3000 ~ plyr::round_any(as.numeric(intervalo_pratico), 600, ceiling),
                                        is.na(intervalo_pratico) ~ as.numeric(intervalo_pratico)),
          intervalo_pratico_min = intervalo_pratico/60) %>%
   ungroup()
@@ -544,11 +638,11 @@ freq_volta_manha <- freq_volta_manha %>%
 freq_volta_manha <- freq_volta_manha %>%
   select(-c(teste)) %>% 
   group_by(servico) %>%
-  mutate(start_time = if_else(row_number()== 1,inicio_operacao+tempo_viagem_ida,start_time),
+  mutate(start_time = if_else(row_number()== 1,inicio_operacao+tempo_viagem_ida+420,start_time),
          start_time = lubridate::ceiling_date(start_time,unit="5 minutes")) %>% 
   mutate(end_time = if_else(row_number() == 1 & 
-                              lubridate::ceiling_date(inicio_operacao+tempo_viagem_ida,unit="5 minutes") != start_time
-                              ,inicio_operacao+tempo_viagem_ida,end_time),
+                              lubridate::ceiling_date(inicio_operacao+tempo_viagem_ida+420,unit="5 minutes") != start_time
+                            ,inicio_operacao+tempo_viagem_ida+420,end_time),
          end_time = lubridate::ceiling_date(end_time,unit="5 minutes")) %>% 
   mutate(start_time = if_else(end_time < start_time,end_time,start_time)) %>% 
   mutate(start_time = if_else(lag(end_time) < start_time & row_number() != 1,lag(end_time),start_time)) %>% 
@@ -556,6 +650,15 @@ freq_volta_manha <- freq_volta_manha %>%
   mutate(ip = ifelse(start_time < entrega_pico_manha,
                      plyr::round_any(as.integer(difftime(end_time,start_time,units='secs')/frota_hora),60)
                      ,intervalo_pratico),
+         ip = case_when(as.numeric(ip) <= 300 ~ plyr::round_any(as.numeric(ip), 30, ceiling),
+                                       as.numeric(ip) > 300 & as.numeric(ip) <= 900 ~ plyr::round_any(as.numeric(ip), 60, ceiling),
+                                       as.numeric(ip) > 900 & as.numeric(ip) <= 3000 ~ plyr::round_any(as.numeric(ip), 300, ceiling),
+                                       as.numeric(ip) > 3000 ~ plyr::round_any(as.numeric(ip), 600, ceiling),
+                                       is.na(ip) ~ as.numeric(ip)),
+         end_time = if_else(start_time < entrega_pico_manha & ip > intervalo_pratico &
+                             frota_referencia > 2 & ip != 0,as.POSIXct(start_time)+(ip*frota_hora),end_time),
+         end_time = if_else(row_number() == 1 &
+                             frota_referencia > 2 & ip != 0,as.POSIXct(start_time)+(ip*frota_hora),end_time),
          intervalo_pratico = ifelse(start_time < entrega_pico_manha & ip > intervalo_pratico &
                                       frota_referencia > 2 & ip != 0,plyr::round_any(as.numeric(ip), 60),intervalo_pratico),
          intervalo_pratico = ifelse(row_number() == 1 &
@@ -603,8 +706,7 @@ freq_volta_manha <- freq_volta_manha %>%
 while (all(freq_volta_manha$inteiro)!=TRUE){
   freq_volta_manha <- freq_volta_manha %>%
     group_by(servico,sentido) %>%
-    mutate(end_time = if_else(
-      inteiro | row_number() == 1,end_time,
+    mutate(end_time = if_else(inteiro,end_time,
       if_else((lead(intervalo_pratico)<intervalo_pratico | is.na(lead(intervalo_pratico)))&end_time<fim_pico_manha,
               start_time+as.integer(minutos/(intervalo_pratico/60))*intervalo_pratico,
               start_time+as.integer(minutos/(intervalo_pratico/60)+1)*intervalo_pratico))) %>%
@@ -736,7 +838,8 @@ freq_volta_tarde <- freq_volta_tarde %>%
   mutate(viagens = as.numeric(as.numeric(difftime(as.POSIXct(end_time), as.POSIXct(start_time), units = "secs")) / intervalo_pratico),
          inteiro = (viagens - as.integer(viagens)),
          inteiro = if_else(inteiro==0,TRUE,FALSE)) %>%
-  ungroup()
+  ungroup() %>%
+  arrange(servico,sentido,start_time)
 
 freq_volta <- rbindlist(list(freq_volta_manha,freq_volta_tarde), fill = T)
 
@@ -991,8 +1094,6 @@ sumario <- freq_final %>%
             intervalo_max = max(intervalo),
             viagens_dia = sum(viagens),
             frota_operante = max(frota_linha)) %>%
-  mutate(inicio_operacao = as.character(as.ITime(inicio_operacao)),
-         fim_operacao = as.character(as.ITime(fim_operacao))) %>%
   left_join(select(linhas,servico,viagem_inicial)) %>%
   mutate(viagens_dia = if_else(viagem_inicial=='circular',viagens_dia,viagens_dia/2)) %>%
   ungroup() %>% 
@@ -1000,32 +1101,37 @@ sumario <- freq_final %>%
          numero = stringr::str_extract(servico, "[0-9]+" )) %>% 
   tidyr::unite(.,servico,letras,numero, na.rm = T,sep='') %>% 
   select(servico,everything()) %>% 
-  mutate(inicio_operacao = if_else(lubridate::hour(hms(inicio_operacao)) < 2,
-                              hms(inicio_operacao)+lubridate::hours(24),
-                              hms(inicio_operacao))) %>% 
-  mutate(fim_operacao = if_else(lubridate::hour(hms(fim_operacao)) < head(lubridate::hour(hms(inicio_operacao))),
-                            hms(fim_operacao)+lubridate::hours(24),
-                            hms(fim_operacao))) %>% 
-  mutate(fim_operacao = if_else(inicio_operacao > fim_operacao,
-                                hms(fim_operacao)+lubridate::hours(24),
-                                hms(fim_operacao))) %>% 
+  mutate(inicio_operacao = if_else(as.IDate(inicio_operacao) > Sys.Date(),
+                                   hms(as.character(as.ITime(inicio_operacao)))+lubridate::hours(24),
+                                   hms(as.character(as.ITime(inicio_operacao))))) %>% 
+  mutate(fim_operacao = if_else(as.IDate(fim_operacao) > Sys.Date(),
+                                hms(as.character(as.ITime(fim_operacao)))+lubridate::hours(24),
+                                hms(as.character(as.ITime(fim_operacao))))) %>%  
   mutate(inicio_operacao = paste(sprintf("%02d", lubridate::hour(inicio_operacao)),
-                            sprintf("%02d", lubridate::minute(inicio_operacao)),
-                            sprintf("%02d", lubridate::second(inicio_operacao)),sep=':'),
+                                 sprintf("%02d", lubridate::minute(inicio_operacao)),
+                                 sprintf("%02d", lubridate::second(inicio_operacao)),sep=':'),
          fim_operacao = paste(sprintf("%02d", lubridate::hour(fim_operacao)),
-                          sprintf("%02d", lubridate::minute(fim_operacao)),
-                          sprintf("%02d", lubridate::second(fim_operacao)),sep=':'))
-
-
+                              sprintf("%02d", lubridate::minute(fim_operacao)),
+                              sprintf("%02d", lubridate::second(fim_operacao)),sep=':'))
 
 freq_final <- freq_final %>%
   group_by(servico,sentido) %>%
   arrange(servico,sentido,start_time) %>%
-  mutate(time_gap = ifelse(row_number() == 1,0,start_time-lag(end_time)))
+  mutate(time_gap = ifelse(row_number() == 1,0,start_time-lag(end_time))) %>% 
+  mutate(partidas_check = as.integer(difftime(end_time,start_time, units = "secs"))/headway_secs,
+         problema_partidas = if_else(viagens==partidas_check,F,T),
+         intervalo_check = (as.integer(difftime(end_time,start_time, units = "secs"))/viagens)/60,
+         problema_intervalo_inteiro = is.integer(intervalo_check/.5))
 
 partidas <- freq_final %>% group_by(servico,sentido) %>% summarise(partidas = sum(viagens))
 
-erros <- length(which(freq_final$time_gap != 0 | is.na(freq_final$time_gap)))
+erros <- length(which(freq_final$time_gap != 0))
+
+erros <- erros + length(which(is.na(freq_final$time_gap)))
+
+erros <- erros + length(which(freq_final$problema_partidas != F))
+
+erros <- erros + length(which(freq_final$problema_intervalo != F))
 
 if (erros > 0){
   print('Erro! Rever cálculos.')
@@ -1040,9 +1146,9 @@ if (erros > 0){
   beepr::beep()
 }
 
-pasta_ano <- paste0("./resultados/sumario/",ano_gtfs)
+pasta_ano <- paste0("../../resultados/sumario/",ano_gtfs)
 ifelse(!dir.exists(file.path(getwd(),pasta_ano)), dir.create(file.path(getwd(),pasta_ano)), FALSE)
-pasta_mes <- paste0("./resultados/sumario/",ano_gtfs,"/",mes_gtfs)
+pasta_mes <- paste0("../../resultados/sumario/",ano_gtfs,"/",mes_gtfs)
 ifelse(!dir.exists(file.path(getwd(),pasta_mes)), dir.create(file.path(getwd(),pasta_mes)), FALSE)
 end_sumario <- paste0(pasta_mes,"/sumario_",ano_gtfs,"-",mes_gtfs,"-",quinzena_gtfs,"Q_",tipo_dia,".csv")
 
@@ -1093,9 +1199,9 @@ freq_final <- freq_final %>%
   tidyr::unite(.,servico,letras,numero, na.rm = T,sep='') %>% 
   select(servico,everything())
 
-pasta_ano <- paste0("./resultados/quadro_horario/",ano_gtfs)
+pasta_ano <- paste0("../../resultados/quadro_horario/",ano_gtfs)
 ifelse(!dir.exists(file.path(getwd(),pasta_ano)), dir.create(file.path(getwd(),pasta_ano)), FALSE)
-pasta_mes <- paste0("./resultados/quadro_horario/",ano_gtfs,"/",mes_gtfs)
+pasta_mes <- paste0("../../resultados/quadro_horario/",ano_gtfs,"/",mes_gtfs)
 ifelse(!dir.exists(file.path(getwd(),pasta_mes)), dir.create(file.path(getwd(),pasta_mes)), FALSE)
 end_qh <- paste0(pasta_mes,"/qh_",ano_gtfs,"-",mes_gtfs,"-",quinzena_gtfs,"Q_",tipo_dia,".csv")
 
